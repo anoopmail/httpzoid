@@ -13,7 +13,9 @@ public interface HttpRequest {
      * @param data entity
      * @return current request for chaining
      */
-    public HttpRequest data(Object data);
+	public HttpRequest data(Object data);
+    public HttpRequest priority(enumPriority priority);
+    public HttpRequest verifyJson(boolean verify);
 
     /**
      * Set request header

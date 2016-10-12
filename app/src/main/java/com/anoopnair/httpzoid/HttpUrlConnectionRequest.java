@@ -1,10 +1,5 @@
 package com.anoopnair.httpzoid;
 
-import android.os.AsyncTask;
-import android.util.Log;
-
-import com.anoopnair.httpzoid.serializers.HttpSerializer;
-
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
@@ -20,8 +15,22 @@ import java.net.ProtocolException;
 import java.net.Proxy;
 import java.net.SocketTimeoutException;
 import java.net.URL;
+import java.security.cert.CertificateException;
 import java.util.HashMap;
 import java.util.Map;
+
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+
+import android.os.AsyncTask;
+import android.util.Log;
+
+import com.anoopnair.httpzoid.serializers.HttpSerializer;
+
 
 
 /**
@@ -44,17 +53,33 @@ public class HttpUrlConnectionRequest implements com.anoopnair.httpzoid.HttpRequ
     private String method;
     private HttpSerializer serializer;
     private Network network;
+	private enumPriority priority;
+	private boolean verifyJson;
 
     public HttpUrlConnectionRequest(URL url, String method, HttpSerializer serializer, Network network) {
         this.url = url;
         this.method = method;
         this.serializer = serializer;
         this.network = network;
+        this.priority = enumPriority.MEDIUM;
+        this.verifyJson = true;
     }
 
     @Override
     public HttpRequest data(Object data) {
         this.data = data;
+        return this;
+    }
+    
+    @Override
+    public HttpRequest priority(enumPriority priority) {
+        this.priority = priority;
+        return this;
+    }
+    
+    @Override
+    public HttpRequest verifyJson(boolean verify) {
+        this.verifyJson = verify;
         return this;
     }
 
@@ -100,34 +125,83 @@ public class HttpUrlConnectionRequest implements com.anoopnair.httpzoid.HttpRequ
         return new AsyncTaskCancellable(new AsyncTask<Void, Void, Action>() {
             @Override
             protected Action doInBackground(Void... params) {
-                HttpURLConnection connection = null;
-                try {
-                    connection = (HttpURLConnection) url.openConnection(proxy);
+                handler.start();
+                handler.setUrl(url);
+            	HttpURLConnection connection = null;
+				try {
+					if(url.getProtocol().equals("http")){
+						connection=(HttpURLConnection) url.openConnection(proxy);
+					}else{
+						enableHostNameVerifier();
+						connection = (HttpsURLConnection) url.openConnection(proxy);
+                        //connection = NetCipher.getHttpsURLConnection(getUrl);
+					}
+                    
                     init(connection);
                     sendData(connection);
                     final HttpDataResponse response = readData(connection);
                     return new Action() {
                         @Override
                         public void call() {
-                            if (response.getCode() < 400)
-                                handler.success(response.getData(), response);
-                            else {
-                                handler.error((String) response.getData(), response);
+                            handler.finish();
+                            handler.logElapsed(handler.getUrl());
+                            if (response.getCode() < 400){
+                            	Object responseObject = response.getData() ; // By Anoop
+                                if(responseObject!= null && responseObject.getClass().isArray()  ) {
+                                    Object[] objects = (Object[]) responseObject ;
+                                    for (Object object : objects ) {
+                                        if (object instanceof IPostReceiveListener) {
+                                            ((IPostReceiveListener) object).run();
+                                        }
+                                    }
+                                }
+
+                            	if(responseObject instanceof IPostReceiveListener){
+                            		((IPostReceiveListener)responseObject).run();
+                            	}
+                            	if(responseObject == null){
+                            		Log.d(TAG, "Empty reponse received.");
+                            		Log.e(TAG, response.toString());
+                            	}
+//                            	handler.success(responseObject, response);
+                            	// Anoop - Prevent response parsing if response is not a parsable JSON.
+                            	if (responseObject == null){
+                            		if(verifyJson){
+                            			Log.e(TAG, "Unparsable response received, firing error callback");
+                            			handler.error("Unparsable JSON reponse received.", response);
+                            		}else{
+                            		    Log.d(TAG, "Empty response, but still firing success callback based on the flag.");
+                            			handler.success(responseObject, response);	
+                            		}
+                            	}else{
+                            		handler.success(responseObject, response);
+                            	}
+                            }else{
+                            	handler.error((String) response.getData(), response);
                             }
+                            	
                         }
                     };
 
                 } catch (HttpzoidException e) {
-                    Log.e(TAG, e.getMessage());
+                	if (e.getMessage() != null){
+                		Log.e(TAG, e.getMessage());
+                	} 
                     return new NetworkFailureAction(handler, e.getNetworkError());
                 } catch (SocketTimeoutException e) {
-                    Log.e(TAG, e.getMessage());
+                    if (e.getMessage() != null){
+                    	Log.e(TAG, e.getMessage());
+                    }
                     return new NetworkFailureAction(handler, NetworkError.Timeout);
                 } catch (ProtocolException e) {
-                    Log.wtf(TAG, e.getMessage());
+                	if (e.getMessage() != null){
+                		Log.wtf(TAG, e.getMessage());
+                	}
                     return new NetworkFailureAction(handler, NetworkError.UnsupportedMethod);
                 } catch (Throwable e) {
-                    Log.wtf(TAG, e);
+                	if (e.getMessage() != null){
+                		Log.wtf(TAG, e);
+                	}
                     return new NetworkFailureAction(handler, NetworkError.Unknown);
                 } finally {
                     if (connection != null)
@@ -141,7 +215,7 @@ public class HttpUrlConnectionRequest implements com.anoopnair.httpzoid.HttpRequ
                 handler.complete();
             }
 
-        }.execute());
+        }.executeOnExecutor(MyExecutor.getInstance(priority)));
     }
 
     private HttpDataResponse readData(HttpURLConnection connection) throws NetworkAuthenticationException, IOException {
@@ -181,7 +255,7 @@ public class HttpUrlConnectionRequest implements com.anoopnair.httpzoid.HttpRequ
         try {
             return connection.getResponseCode();
         } catch (IOException e) {
-            if (e.getMessage().equals("Received authentication challenge is null"))
+            if (e.getMessage() != null && e.getMessage().equals("Received authentication challenge is null"))
                 return 401;
             throw e;
         }
@@ -281,4 +355,39 @@ public class HttpUrlConnectionRequest implements com.anoopnair.httpzoid.HttpRequ
         }
         return Object.class;
     }
+    private void enableHostNameVerifier() {
+		TrustManager[] trustAllCerts = new TrustManager[] { new X509TrustManager() {
+			public java.security.cert.X509Certificate[] getAcceptedIssuers() {
+				return null;
+			}
+			@Override
+			public void checkClientTrusted(
+					java.security.cert.X509Certificate[] chain, String authType)
+							throws CertificateException {
+
+			}
+			@Override
+			public void checkServerTrusted(
+					java.security.cert.X509Certificate[] chain, String authType)
+							throws CertificateException {
+
+			}
+		} };
+		SSLContext sc;
+		try {
+			sc = SSLContext.getInstance("TLS");
+			sc.init(null, trustAllCerts, new java.security.SecureRandom());
+			HttpsURLConnection.setDefaultSSLSocketFactory(sc.getSocketFactory());
+			HostnameVerifier allHostsValid = new HostnameVerifier() {
+				public boolean verify(String hostname, SSLSession session) {
+					return true;
+				}
+			};
+			HttpsURLConnection.setDefaultHostnameVerifier(allHostsValid);
+
+		} catch (Exception e1) {
+			e1.printStackTrace();
+		}
+	}
 }
+
